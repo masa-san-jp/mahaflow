@@ -3,7 +3,7 @@ import { injectClusterInputs, type ClusterInput, type InjectOptions } from '../m
 import { estimateClusters, type RawData } from '../math/estimate';
 import { evalField, projectCluster } from '../math/project';
 import { tourBasis } from '../math/tour';
-import { DeterministicClock } from './clock';
+import { DeterministicClock, frameToTime, normalizeTimebase } from './clock';
 import { RafLoop } from './rafLoop';
 import { createFieldRenderer, type FieldRenderer, type FrameUniforms } from '../render/fieldView';
 import { screenToField } from '../interact/pointer';
@@ -18,8 +18,14 @@ import type { PaletteDef } from '../palette/palettes';
 import type { State } from './state';
 import type { InitConfig } from './types';
 import { Prng, substream } from '../math/prng';
+import { exportOffline, type ExportConfig } from '../export/offline';
+import { startRealtimeRecording } from '../export/realtime';
 
 const CLOCK_FPS = 30;
+const EXPORT_MAX_WIDTH = 1920;
+const EXPORT_MAX_HEIGHT = 1080;
+const EXPORT_MAX_FPS = 60;
+const EXPORT_4K_THRESHOLD = 3840;
 
 export interface CoreDeps {
   createRenderer?: (canvas: HTMLCanvasElement) => FieldRenderer;
@@ -67,6 +73,9 @@ export class MahaFlowCore {
   private autoplayShuffleOrder: string[] = [];
   private autoplayRandomizeRng: Prng | null = null;
   private lastAutoplayFrame = 0;
+
+  private lastContainerSize = { width: 0, height: 0 };
+  private exportAbortController: AbortController | null = null;
 
   constructor(
     private readonly container: HTMLElement,
@@ -132,6 +141,8 @@ export class MahaFlowCore {
       for (const entry of entries) {
         const { width, height } = entry.contentRect;
         if (width === 0 || height === 0) continue;
+        this.lastContainerSize = { width, height };
+        if (this.exportAbortController) continue; // don't fight the export resolution mid-export
         this.canvas.width = Math.round(width * this.pixelRatio);
         this.canvas.height = Math.round(height * this.pixelRatio);
         this.renderer.setSize(this.canvas.width, this.canvas.height, this.pixelRatio);
@@ -185,20 +196,17 @@ export class MahaFlowCore {
     return buildClusters(this.raw, live.spread, live.anisotropy);
   }
 
-  private onFrame(deltaSeconds: number): void {
-    if (this.disposed) return;
-    const resolved = this.modulation.resolve(this.live, this.clock.currentFrame);
-    if (resolved.playing) {
-      this.clock.advanceByElapsedSeconds(deltaSeconds, 0.12 + 1.4 * resolved.speed);
-    }
-    if (this.autoplayConfig && resolved.playing) {
-      const dueFrames = framesPerInterval(this.autoplayConfig.interval, CLOCK_FPS);
-      if (this.clock.currentFrame - this.lastAutoplayFrame >= dueFrames) {
-        this.lastAutoplayFrame = this.clock.currentFrame;
-        this.advanceAutoplay();
-      }
-    }
-    const t = this.clock.time;
+  /**
+   * Pure per-frame evaluation shared by the display loop and export (design
+   * spec §3.3 frame pipeline / §7.2 determinism condition): given a frame
+   * number, resolve modulation, project clusters, and build uniforms.
+   * Depends only on `frameNumber` (plus the current base live/cluster
+   * state) — never on wall-clock time — so calling it twice with the same
+   * frame number always produces the same result, live display or export.
+   */
+  private evaluateFrame(frameNumber: number): { uniforms: FrameUniforms; finite: boolean } {
+    const resolved = this.modulation.resolve(this.live, frameNumber);
+    const t = frameToTime(frameNumber, CLOCK_FPS);
     const basis = tourBasis(t, this.dims);
     const clusters = this.clustersFor(resolved);
     const visible = this.visibleClusters(clusters, resolved);
@@ -211,11 +219,6 @@ export class MahaFlowCore {
       projected.every((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && Number.isFinite(p.c) && p.m.every(Number.isFinite)) &&
       amps.every(Number.isFinite);
 
-    if (!finite) {
-      this.events.emit('warning', { code: 'nan-frame-skip', message: 'Non-finite field parameters; frame skipped.' });
-      return;
-    }
-
     const uniforms: FrameUniforms = {
       projected,
       amps,
@@ -226,6 +229,28 @@ export class MahaFlowCore {
       time: t,
       palette: resolvePalette(resolved.palette, this.extraPalettes),
     };
+    return { uniforms, finite };
+  }
+
+  private onFrame(deltaSeconds: number): void {
+    if (this.disposed) return;
+    const resolvedForClock = this.modulation.resolve(this.live, this.clock.currentFrame);
+    if (resolvedForClock.playing) {
+      this.clock.advanceByElapsedSeconds(deltaSeconds, 0.12 + 1.4 * resolvedForClock.speed);
+    }
+    if (this.autoplayConfig && resolvedForClock.playing) {
+      const dueFrames = framesPerInterval(this.autoplayConfig.interval, CLOCK_FPS);
+      if (this.clock.currentFrame - this.lastAutoplayFrame >= dueFrames) {
+        this.lastAutoplayFrame = this.clock.currentFrame;
+        this.advanceAutoplay();
+      }
+    }
+
+    const { uniforms, finite } = this.evaluateFrame(this.clock.currentFrame);
+    if (!finite) {
+      this.events.emit('warning', { code: 'nan-frame-skip', message: 'Non-finite field parameters; frame skipped.' });
+      return;
+    }
     this.renderer.renderFrame(uniforms);
   }
 
@@ -438,6 +463,108 @@ export class MahaFlowCore {
   on<K extends MahaEvent>(event: K, cb: (payload: MahaEventMap[K]) => void): () => void {
     if (this.guardDisposed()) return () => {};
     return this.events.on(event, cb);
+  }
+
+  /**
+   * Method A (realtime, VFR) or Method B (offline, CFR — default;
+   * design spec §11) export. Resolution/fps are clamped to the browser-in
+   * limits (1080p, 60fps) with a warning; 4K+ is pointed at Method C.
+   */
+  async exportVideo(cfg: ExportConfig): Promise<Blob> {
+    if (this.guardDisposed()) throw new Error('MahaFlowCore: exportVideo() called after dispose()');
+
+    const clamped = this.clampExportConfig(cfg);
+
+    if (clamped.mode === 'realtime') {
+      const recording = startRealtimeRecording(this.canvas);
+      await new Promise((resolve) => setTimeout(resolve, clamped.duration * 1000));
+      const blob = await recording.stop();
+      this.events.emit('exportdone', { blob, format: 'webm', fallback: false });
+      return blob;
+    }
+
+    return this.exportOfflineInternal(clamped);
+  }
+
+  private clampExportConfig(cfg: ExportConfig): ExportConfig {
+    const clamped = { ...cfg };
+    let clampedAny = false;
+
+    if (clamped.width > EXPORT_MAX_WIDTH || clamped.height > EXPORT_MAX_HEIGHT) {
+      if (clamped.width >= EXPORT_4K_THRESHOLD || clamped.height >= EXPORT_4K_THRESHOLD) {
+        this.events.emit('warning', {
+          code: 'export-resolution-4k',
+          message: '4K+ export is out of browser-side scope; use the Method C server-render job contract instead.',
+        });
+      }
+      clamped.width = Math.min(clamped.width, EXPORT_MAX_WIDTH);
+      clamped.height = Math.min(clamped.height, EXPORT_MAX_HEIGHT);
+      clampedAny = true;
+    }
+
+    const { num, den } = normalizeTimebase(clamped.fps ?? 30);
+    if (num / den > EXPORT_MAX_FPS) {
+      clamped.fps = EXPORT_MAX_FPS;
+      clampedAny = true;
+    }
+
+    if (clampedAny) {
+      this.events.emit('warning', {
+        code: 'export-config-clamped',
+        message: `Export resolution/fps clamped to the browser-side limit (${EXPORT_MAX_WIDTH}x${EXPORT_MAX_HEIGHT}, ${EXPORT_MAX_FPS}fps).`,
+      });
+    }
+    return clamped;
+  }
+
+  private async exportOfflineInternal(cfg: ExportConfig): Promise<Blob> {
+    this.rafLoop.stop();
+    const priorWidth = this.canvas.width;
+    const priorHeight = this.canvas.height;
+    const priorPixelRatio = this.pixelRatio;
+
+    this.canvas.width = cfg.width;
+    this.canvas.height = cfg.height;
+    this.renderer.setSize(cfg.width, cfg.height, 1);
+
+    const controller = new AbortController();
+    this.exportAbortController = controller;
+
+    let lastFrameFinite = true;
+    try {
+      const result = await exportOffline(
+        cfg,
+        {
+          canvas: this.canvas,
+          renderFrame: (frameIndex) => {
+            const { uniforms, finite } = this.evaluateFrame(frameIndex);
+            lastFrameFinite = finite;
+            if (finite) this.renderer.renderFrame(uniforms);
+          },
+          isFinite: () => lastFrameFinite,
+        },
+        {
+          signal: controller.signal,
+          onProgress: (p) => this.events.emit('exportprogress', p),
+        },
+      );
+      this.events.emit('exportdone', result);
+      return result.blob;
+    } catch (err) {
+      this.events.emit('exporterror', { reason: err instanceof Error ? err.message : String(err) });
+      throw err;
+    } finally {
+      this.exportAbortController = null;
+      this.canvas.width = priorWidth || Math.round(this.lastContainerSize.width * priorPixelRatio);
+      this.canvas.height = priorHeight || Math.round(this.lastContainerSize.height * priorPixelRatio);
+      this.renderer.setSize(this.canvas.width, this.canvas.height, priorPixelRatio);
+      if (!this.disposed) this.rafLoop.start();
+    }
+  }
+
+  cancelExport(): void {
+    if (this.guardDisposed()) return;
+    this.exportAbortController?.abort();
   }
 
   dispose(): void {

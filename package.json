@@ -58,5 +58,8 @@
     "react-dom": {
       "optional": true
     }
+  },
+  "dependencies": {
+    "mediabunny": "^1.50.8"
   }
 }

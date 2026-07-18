@@ -51,3 +51,16 @@ export {
   PROTANOPIA_MATRIX,
   DEUTERANOPIA_MATRIX,
 } from './palette/luminance';
+export { createFieldRenderer } from './render/fieldView';
+export type { FieldRenderer, FrameUniforms } from './render/fieldView';
+export { exportOffline, ExportCancelledError, ExportNonFiniteError } from './export/offline';
+export type { ExportConfig, ExportProgress, OfflineExportDeps, OfflineExportHooks, RenderFrameFn } from './export/offline';
+export { startRealtimeRecording } from './export/realtime';
+export type { RealtimeRecording } from './export/realtime';
+export {
+  validateServerExportJob,
+  serializeServerExportJob,
+  parseServerExportJob,
+  SchemaError,
+} from './export/serverContract';
+export type { ServerExportJob, ServerExportResult } from './export/serverContract';
