@@ -54,6 +54,7 @@ export class MahaFlowCore {
   private readonly resizeObserver: ResizeObserver;
   private readonly rafLoop: RafLoop;
   private readonly detachControls: () => void;
+  private uiPanelDispose: (() => void) | null = null;
   private disposed = false;
 
   private autoplayConfig: AutoplayConfig | null = null;
@@ -140,6 +141,24 @@ export class MahaFlowCore {
       this.rafLoop.start();
       this.events.emit('ready', {});
     });
+
+    if (initConfig.autoplay) {
+      this.startAutoplay(initConfig.autoplay);
+    }
+
+    // ui:"dev" only: dynamically import the panel so ui:"none" (default)
+    // never pulls its DOM/code into the bundle (design spec §6.3, T-S04).
+    if (initConfig.ui === 'dev') {
+      const panelContainer = container.ownerDocument.createElement('div');
+      container.appendChild(panelContainer);
+      import('../ui/devPanel').then(({ mountDevPanel }) => {
+        if (this.disposed) {
+          panelContainer.remove();
+          return;
+        }
+        this.uiPanelDispose = mountDevPanel(panelContainer, this);
+      });
+    }
   }
 
   /** Deterministic frame position; survives across dispose/reconstruct for resume (T-M10). */
@@ -400,6 +419,7 @@ export class MahaFlowCore {
     this.resizeObserver.disconnect();
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.detachControls();
+    this.uiPanelDispose?.();
     this.renderer.dispose();
     this.canvas.remove();
     // Note: the event bus is intentionally left intact (not cleared) so a

@@ -24,3 +24,4 @@ export type { PointSample } from './math/pointcloud';
 export { spawnParticle, evalCurl, particleVelocity, shouldRespawn } from './math/particles';
 export type { ParticleSpawn } from './math/particles';
 export { Prng, substream } from './math/prng';
+export type { DevPanelHost } from './ui/devPanel';
