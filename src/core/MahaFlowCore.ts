@@ -1,4 +1,6 @@
 import { buildClusters, generateRawClusters, type GeneratedCluster, type RawClusterSeeds } from '../math/cluster';
+import { injectClusterInputs, type ClusterInput, type InjectOptions } from '../math/dataInjection';
+import { estimateClusters, type RawData } from '../math/estimate';
 import { evalField, projectCluster } from '../math/project';
 import { tourBasis } from '../math/tour';
 import { DeterministicClock } from './clock';
@@ -56,6 +58,9 @@ export class MahaFlowCore {
   private readonly detachControls: () => void;
   private uiPanelDispose: (() => void) | null = null;
   private disposed = false;
+
+  /** Once data is injected via setData(), spread/anisotropy no longer regenerate clusters (design spec §9.1). */
+  private dataSource: 'generated' | 'injected' = 'generated';
 
   private autoplayConfig: AutoplayConfig | null = null;
   private autoplayIndex = 0;
@@ -175,6 +180,7 @@ export class MahaFlowCore {
   }
 
   private clustersFor(live: LiveParams): GeneratedCluster[] {
+    if (this.dataSource === 'injected') return this.clusters;
     if (live.spread === this.live.spread && live.anisotropy === this.live.anisotropy) return this.clusters;
     return buildClusters(this.raw, live.spread, live.anisotropy);
   }
@@ -255,9 +261,27 @@ export class MahaFlowCore {
     if (Object.keys(value).length === 0) return;
 
     this.live = { ...this.live, ...value };
-    if (value.spread !== undefined || value.anisotropy !== undefined) {
+    if (this.dataSource === 'generated' && (value.spread !== undefined || value.anisotropy !== undefined)) {
       this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
     }
+    this.events.emit('statechange', this.getState());
+  }
+
+  /**
+   * Inject cluster data (design spec §9): form A (`ClusterInput[]`, direct
+   * μ/Σ) or form B (`RawData`, raw samples — estimated via
+   * `estimateClusters` and normalized to form A before injection, §9.2).
+   * Dimension mismatches throw synchronously (T-A10); a non-positive-definite
+   * sigma is eigenvalue-clipped with a warning, or throws in `strict` mode.
+   * After injection, `spread`/`anisotropy` no longer regenerate clusters.
+   */
+  setData(data: ClusterInput[] | RawData, opts: InjectOptions = {}): void {
+    if (this.guardDisposed()) return;
+    const clusterInputs = Array.isArray(data) ? data : estimateClusters(data, this.dims);
+    const { clusters, warnings } = injectClusterInputs(clusterInputs, this.dims, opts);
+    for (const w of warnings) this.events.emit('warning', w);
+    this.dataSource = 'injected';
+    this.clusters = clusters;
     this.events.emit('statechange', this.getState());
   }
 
@@ -284,6 +308,7 @@ export class MahaFlowCore {
     if (this.guardDisposed()) return;
     const nextSeed = seed ?? Math.floor(this.randomizeRng.next() * 0xffffffff);
     this.seed = nextSeed;
+    this.dataSource = 'generated';
     this.raw = generateRawClusters(this.seed, this.dims, this.maxClusters);
     this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
     this.events.emit('statechange', this.getState());
@@ -325,9 +350,12 @@ export class MahaFlowCore {
     this.live = { ...this.live, ...value };
     if (preset.state.seed !== undefined) {
       this.seed = preset.state.seed;
+      this.dataSource = 'generated';
       this.raw = generateRawClusters(this.seed, this.dims, this.maxClusters);
     }
-    this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
+    if (this.dataSource === 'generated') {
+      this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
+    }
     this.events.emit('statechange', this.getState());
   }
 

@@ -25,3 +25,29 @@ export { spawnParticle, evalCurl, particleVelocity, shouldRespawn } from './math
 export type { ParticleSpawn } from './math/particles';
 export { Prng, substream } from './math/prng';
 export type { DevPanelHost } from './ui/devPanel';
+export { mahalanobisMetric, mahalanobisGlslChunk } from './math/metric';
+export type { Metric } from './math/metric';
+export { injectClusterInputs } from './math/dataInjection';
+export type { ClusterInput, InjectOptions, InjectResult } from './math/dataInjection';
+export { estimateClusters, shrinkageCovariance } from './math/estimate';
+export type { RawData } from './math/estimate';
+export {
+  jacobiEigenSymmetric,
+  nearestPositiveDefinite,
+  symmetrize,
+  cholesky,
+  matVec,
+  selfOuter,
+  addScaledIdentity,
+  quadForm,
+} from './math/linalg';
+export type { EigenDecomposition } from './math/linalg';
+export {
+  paletteColor,
+  relativeLuminance,
+  luminanceCurve,
+  isMonotonic,
+  applyColorMatrix,
+  PROTANOPIA_MATRIX,
+  DEUTERANOPIA_MATRIX,
+} from './palette/luminance';
