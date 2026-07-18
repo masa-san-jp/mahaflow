@@ -7,13 +7,14 @@
 
 ## 実装状況
 
-計画書のフェーズ WBS（P0〜P5）のうち、**P0（基盤: コア分離・決定論）** と **P1（config/state/API/イベント）** を実装済み。
+計画書のフェーズ WBS（P0〜P5）のうち、**P0**・**P1**・**P2a（P2の一部）** を実装済み。
 
 | フェーズ | 内容 | 状態 |
 |---|---|---|
 | P0 | seed PRNG・サブストリーム・クラスタ生成・グランドツアー・射影/距離場・決定論クロック・`MahaFlowCore` 骨格(mount/resize/dispose)・場ビュー(なめらか)描画 | 実装済み |
-| P1 | InitConfig/LiveParams スキーマ・既定値・クランプ、`setConfig`/`getState`/`randomize`/`play`/`pause`、イベント基盤(`on`/`ready`/`statechange`/`hover`/`warning`)、エラー処理方針(init-onlyキー・範囲クランプ・dispose後API・NaNフレームスキップ) | 実装済み |
-| P2 | 表現網羅(4表現×2視点×2地形)・要素スコープ入力(ズーム/パン/回転)・パレット機構・変調バス・プリセット・自動再生・reduced-motion/自動品質調整 | 未着手 |
+| P1 | InitConfig/LiveParams スキーマ・既定値・クランプ、`setConfig`/`getState`/`randomize`/`play`/`pause`、イベント基盤、エラー処理方針 | 実装済み |
+| P2a | 場ビューのwave/capillaryモード、パレット機構(aurora/abyss/dawn+追加API)、要素スコープ入力(ズーム/パン)、変調バス、プリセット | 実装済み |
+| P2b | 俯瞰ビュー・地形(山/すり鉢)・粒子表現(場ビュー粒子モード含む)・自動再生・reduced-motion時の自動品質調整 | 未着手 |
 | P3 | Web Component・Reactラッパ・スタンドアロンHTML | 未着手 |
 | P4 | データ注入(形態A/B)・Metric抽象・色覚検証 | 未着手 |
 | P5 | 動画エクスポート(方式A/B/C) | 未着手 |
@@ -24,18 +25,21 @@
 src/
 ├─ math/     prng.ts / linalg.ts / cluster.ts / tour.ts / project.ts
 ├─ core/     clock.ts / rafLoop.ts / config.ts / state.ts / events.ts /
-│            MahaFlowCore.ts / types.ts
+│            modulation.ts / presets.ts / MahaFlowCore.ts / types.ts
 ├─ render/   fieldView.ts / shaders/field.glsl.ts
-├─ interact/ pointer.ts (screen→field座標変換。hoverイベントで使用)
+├─ palette/  palettes.ts
+├─ interact/ pointer.ts (hover用screen→field変換) / controls.ts (ズーム/パン)
 └─ index.ts
 ```
 
 対応テスト（`docs/...implementation-plan-with-tests.md` §6 ID対応）:
-T-M01〜T-M10, T-A01〜T-A05, T-A07〜T-A09, T-I01, T-I05。
+T-M01〜T-M10, T-A01〜T-A05, T-A07〜T-A09, T-A12, T-D01〜T-D02, T-I01〜T-I05。
 
-未対応: T-A06(state往復のピクセル一致。プリセット機構がP2のため保留),
+未対応: T-A06(state往復のピクセル一致。視覚回帰はPlaywright未整備のため保留),
 T-A10(データ注入時の次元不一致。P4のsetData実装後),
-T-A11(NaN保護の網羅的検証。基本ガードは実装済みだが専用テストは未追加)。
+T-A11(NaN保護の網羅的検証。基本ガードは実装済みだが専用テストは未追加),
+T-V*(視覚回帰。Playwright未導入),
+T-C*(色覚検証。P4)。
 
 ## セットアップ
 
@@ -47,8 +51,9 @@ npm run build
 
 ## 既知の未実装範囲
 
-- wave/capillary/particle表現、俯瞰ビュー、地形、パレット切替UI、変調バス、プリセット、自動再生（P2）
+- 俯瞰ビュー・地形(山/すり鉢)・粒子表現(場ビュー粒子モードは現状smoothへフォールバック)・自動再生・自動品質調整（P2b）
 - Web Component `<maha-flow>`・Reactラッパ・devパネル・スタンドアロンHTML（P3）
 - データ注入(形態A/B)・`Metric`抽象・色覚検証（P4）
 - 動画エクスポート方式A/B/C（P5）
 - Playwrightによる視覚回帰・統合テスト、ffprobeによるエクスポート検証（本PRまでVitestのみ）
+- パレット既定3種の係数はモックアップHTML(`mahalanobis-fluid-mockup-v3.html`)が本リポジトリに存在しないため暫定値。正式係数は資産入手後に差し替え要

@@ -1,8 +1,10 @@
+import type { LiveParams } from './config';
+import type { PresetDef } from './presets';
+import type { PaletteDef } from '../palette/palettes';
+
 /**
- * P0 subset of the API contract (design spec §5). Only the fields needed to
- * stand up the core lifecycle and the smooth field-view render path are
- * included here; the full InitConfig/LiveParams surface (data injection,
- * presets, autoplay, export, ...) lands in later phases (P1-P5).
+ * InitConfig (design spec §5). Data injection (`data`/`metric`), autoplay,
+ * and `ui` are later phases (P3-P4) and accepted-but-inert here.
  */
 export interface InitConfig {
   /** Required: all math/phase is derived deterministically from this seed. */
@@ -10,4 +12,9 @@ export interface InitConfig {
   dims?: number;
   maxClusters?: number;
   pixelRatio?: number;
+  palettes?: Record<string, PaletteDef> | null;
+  presets?: PresetDef[] | null;
+  preset?: string | null;
+  /** Initial live-param overrides applied on top of the defaults (and any `preset`). */
+  initialLive?: Partial<LiveParams>;
 }

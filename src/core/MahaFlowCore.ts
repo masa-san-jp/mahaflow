@@ -5,8 +5,13 @@ import { DeterministicClock } from './clock';
 import { RafLoop } from './rafLoop';
 import { createFieldRenderer, type FieldRenderer, type FrameUniforms } from '../render/fieldView';
 import { screenToField } from '../interact/pointer';
+import { attachControls } from '../interact/controls';
 import { DEFAULT_LIVE_PARAMS, sanitizeLiveParamsPatch, type LiveParams } from './config';
 import { EventBus, type MahaEvent, type MahaEventMap } from './events';
+import { ModulationBus, type ModulationSource } from './modulation';
+import { BUILTIN_PRESETS, type PresetDef } from './presets';
+import { resolvePalette } from '../palette/palettes';
+import type { PaletteDef } from '../palette/palettes';
 import type { State } from './state';
 import type { InitConfig } from './types';
 import { Prng } from '../math/prng';
@@ -17,11 +22,10 @@ export interface CoreDeps {
 
 /**
  * Framework-independent core (design spec §3). Implements the P0 render
- * lifecycle plus the P1 config/state/API/event surface: setConfig/getState,
- * randomize, play/pause, and the ready/statechange/hover/warning events.
- * Presets, autoplay, data injection, additional views/modes, and export are
- * later phases (P2-P5) layered on top of this without changing this
- * lifecycle or event contract.
+ * lifecycle, the P1 config/state/API/event surface, and the P2a additions:
+ * mode/palette rendering, element-scoped zoom/pan input, the modulation
+ * bus, and presets. Orbit view, terrain, the particle system, and
+ * autoplay are P2b scope, layered on without changing this contract.
  */
 export class MahaFlowCore {
   readonly ready: Promise<void>;
@@ -30,8 +34,11 @@ export class MahaFlowCore {
   private readonly dims: number;
   private readonly maxClusters: number;
   private readonly pixelRatio: number;
+  private readonly extraPalettes: Record<string, PaletteDef>;
 
   private readonly events = new EventBus();
+  private readonly modulation = new ModulationBus();
+  private readonly presets = new Map<string, PresetDef>();
   private seed: number;
   private raw: RawClusterSeeds;
   private clusters: GeneratedCluster[];
@@ -43,6 +50,7 @@ export class MahaFlowCore {
   private readonly renderer: FieldRenderer;
   private readonly resizeObserver: ResizeObserver;
   private readonly rafLoop: RafLoop;
+  private readonly detachControls: () => void;
   private disposed = false;
 
   constructor(
@@ -59,14 +67,32 @@ export class MahaFlowCore {
     this.dims = initConfig.dims ?? 8;
     this.maxClusters = initConfig.maxClusters ?? 6;
     this.pixelRatio = initConfig.pixelRatio ?? container.ownerDocument.defaultView?.devicePixelRatio ?? 1;
+    this.extraPalettes = initConfig.palettes ?? {};
 
     this.randomizeRng = new Prng((this.seedInitial ^ 0x9e3779b9) >>> 0);
+
+    for (const preset of [...BUILTIN_PRESETS, ...(initConfig.presets ?? [])]) {
+      this.presets.set(preset.name, preset);
+    }
 
     const { value: clampedDefaults } = sanitizeLiveParamsPatch(
       DEFAULT_LIVE_PARAMS as unknown as Record<string, unknown>,
       this.maxClusters,
     );
     this.live = { ...DEFAULT_LIVE_PARAMS, ...clampedDefaults };
+
+    if (initConfig.preset) {
+      const preset = this.presets.get(initConfig.preset);
+      if (preset) {
+        const { value } = sanitizeLiveParamsPatch(preset.state as Record<string, unknown>, this.maxClusters);
+        this.live = { ...this.live, ...value };
+        if (preset.state.seed !== undefined) this.seed = preset.state.seed;
+      }
+    }
+    if (initConfig.initialLive) {
+      const { value } = sanitizeLiveParamsPatch(initConfig.initialLive as Record<string, unknown>, this.maxClusters);
+      this.live = { ...this.live, ...value };
+    }
 
     this.raw = generateRawClusters(this.seed, this.dims, this.maxClusters);
     this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
@@ -78,6 +104,11 @@ export class MahaFlowCore {
     this.canvas.style.height = '100%';
     container.appendChild(this.canvas);
     this.canvas.addEventListener('pointermove', this.onPointerMove);
+
+    this.detachControls = attachControls(container, {
+      getZoomPan: () => ({ zoom: this.live.zoom, pan: this.live.pan }),
+      setZoomPan: (zoom, pan) => this.setConfig({ zoom, pan }),
+    });
 
     const factory = deps.createRenderer ?? createFieldRenderer;
     this.renderer = factory(this.canvas);
@@ -107,25 +138,32 @@ export class MahaFlowCore {
     return this.clock.currentFrame;
   }
 
-  private visibleClusters(): GeneratedCluster[] {
-    return this.clusters.slice(0, this.live.clusterCount);
+  private visibleClusters(clusters: GeneratedCluster[], live: LiveParams): GeneratedCluster[] {
+    return clusters.slice(0, live.clusterCount);
   }
 
-  private visibleAmps(visible: GeneratedCluster[]): number[] {
-    return visible.map((c, i) => this.live.amp[i] ?? c.amp);
+  private visibleAmps(visible: GeneratedCluster[], live: LiveParams): number[] {
+    return visible.map((c, i) => live.amp[i] ?? c.amp);
+  }
+
+  private clustersFor(live: LiveParams): GeneratedCluster[] {
+    if (live.spread === this.live.spread && live.anisotropy === this.live.anisotropy) return this.clusters;
+    return buildClusters(this.raw, live.spread, live.anisotropy);
   }
 
   private onFrame(deltaSeconds: number): void {
     if (this.disposed) return;
-    if (this.live.playing) {
-      this.clock.advanceByElapsedSeconds(deltaSeconds, 0.12 + 1.4 * this.live.speed);
+    const resolved = this.modulation.resolve(this.live, this.clock.currentFrame);
+    if (resolved.playing) {
+      this.clock.advanceByElapsedSeconds(deltaSeconds, 0.12 + 1.4 * resolved.speed);
     }
     const t = this.clock.time;
     const basis = tourBasis(t, this.dims);
-    const visible = this.visibleClusters();
+    const clusters = this.clustersFor(resolved);
+    const visible = this.visibleClusters(clusters, resolved);
     const projected = visible.map((c) => projectCluster(c, basis.u, basis.v));
-    const amps = this.visibleAmps(visible);
-    const tau = this.live.softness;
+    const amps = this.visibleAmps(visible, resolved);
+    const tau = resolved.softness;
 
     const finite =
       Number.isFinite(tau) &&
@@ -137,7 +175,16 @@ export class MahaFlowCore {
       return;
     }
 
-    const uniforms: FrameUniforms = { projected, amps, tau, zoom: this.live.zoom, pan: this.live.pan };
+    const uniforms: FrameUniforms = {
+      projected,
+      amps,
+      tau,
+      zoom: resolved.zoom,
+      pan: resolved.pan,
+      mode: resolved.mode,
+      time: t,
+      palette: resolvePalette(resolved.palette, this.extraPalettes),
+    };
     this.renderer.renderFrame(uniforms);
   }
 
@@ -150,9 +197,9 @@ export class MahaFlowCore {
     const [px, py] = screenToField(e.clientX - rect.left, e.clientY - rect.top, width, height, this.live.zoom, this.live.pan);
 
     const basis = tourBasis(this.clock.time, this.dims);
-    const visible = this.visibleClusters();
+    const visible = this.visibleClusters(this.clusters, this.live);
     const projected = visible.map((c) => projectCluster(c, basis.u, basis.v));
-    const amps = this.visibleAmps(visible);
+    const amps = this.visibleAmps(visible, this.live);
     const { D } = evalField([px, py], projected, amps, this.live.softness);
     this.events.emit('hover', { D, x: px, y: py });
   };
@@ -179,15 +226,17 @@ export class MahaFlowCore {
     this.events.emit('statechange', this.getState());
   }
 
-  getState(): State {
+  /** `resolved: true` folds in the current modulation-bus output (design spec §7.2); the base state is otherwise returned. */
+  getState(opts: { resolved?: boolean } = {}): State {
+    const live = opts.resolved ? this.modulation.resolve(this.live, this.clock.currentFrame) : this.live;
     return {
-      ...this.live,
-      amp: [...this.live.amp],
-      pan: [...this.live.pan] as [number, number],
-      orbit: { ...this.live.orbit },
+      ...live,
+      amp: [...live.amp],
+      pan: [...live.pan] as [number, number],
+      orbit: { ...live.orbit },
       seed: this.seed,
       frame: this.clock.currentFrame,
-      clusters: this.clusters,
+      clusters: opts.resolved ? this.clustersFor(live) : this.clusters,
       autoplay: false,
     };
   }
@@ -215,6 +264,67 @@ export class MahaFlowCore {
     this.events.emit('statechange', this.getState());
   }
 
+  addModulation(source: ModulationSource): () => void {
+    if (this.guardDisposed()) return () => {};
+    return this.modulation.add(source);
+  }
+
+  clearModulation(): void {
+    if (this.guardDisposed()) return;
+    this.modulation.clear();
+  }
+
+  applyPreset(name: string): void {
+    if (this.guardDisposed()) return;
+    const preset = this.presets.get(name);
+    if (!preset) {
+      this.events.emit('warning', { code: 'unknown-preset', message: `No preset named "${name}".` });
+      return;
+    }
+    const { value, warnings } = sanitizeLiveParamsPatch(preset.state as Record<string, unknown>, this.maxClusters);
+    for (const w of warnings) this.events.emit('warning', w);
+    this.live = { ...this.live, ...value };
+    if (preset.state.seed !== undefined) {
+      this.seed = preset.state.seed;
+      this.raw = generateRawClusters(this.seed, this.dims, this.maxClusters);
+    }
+    this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
+    this.events.emit('statechange', this.getState());
+  }
+
+  savePreset(name: string): PresetDef {
+    if (this.guardDisposed()) return { name, state: {} };
+    const state = this.getState();
+    const preset: PresetDef = {
+      name,
+      state: {
+        clusterCount: state.clusterCount,
+        spread: state.spread,
+        anisotropy: state.anisotropy,
+        softness: state.softness,
+        amp: [...state.amp],
+        mode: state.mode,
+        terrain: state.terrain,
+        palette: state.palette,
+        isoDensity: state.isoDensity,
+        flow: state.flow,
+        view: state.view,
+        zoom: state.zoom,
+        pan: [...state.pan],
+        orbit: { ...state.orbit },
+        playing: state.playing,
+        speed: state.speed,
+        seed: state.seed,
+      },
+    };
+    this.presets.set(name, preset);
+    return preset;
+  }
+
+  listPresets(): string[] {
+    return Array.from(this.presets.keys());
+  }
+
   on<K extends MahaEvent>(event: K, cb: (payload: MahaEventMap[K]) => void): () => void {
     if (this.guardDisposed()) return () => {};
     return this.events.on(event, cb);
@@ -226,6 +336,7 @@ export class MahaFlowCore {
     this.rafLoop.stop();
     this.resizeObserver.disconnect();
     this.canvas.removeEventListener('pointermove', this.onPointerMove);
+    this.detachControls();
     this.renderer.dispose();
     this.canvas.remove();
     // Note: the event bus is intentionally left intact (not cleared) so a

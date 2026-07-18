@@ -79,3 +79,22 @@ export function gradD(
   const denom = Math.max(s, S_MIN);
   return [gx / denom, gy / denom];
 }
+
+/**
+ * Interference-wave term (design spec §4.5): wave(p) = Σ ampᵢ·sin(6.5·dᵢ − 1.9t)·exp(−0.42·dᵢ),
+ * dᵢ = √d²ᵢ. Drives the field-view "wave" mode's color modulation.
+ */
+export function evalWave(
+  p: [number, number],
+  projected: ProjCluster[],
+  amps: number[],
+  t: number,
+): number {
+  let wave = 0;
+  for (let i = 0; i < projected.length; i++) {
+    const d2 = squaredDistance(p, projected[i] as ProjCluster);
+    const d = Math.sqrt(d2);
+    wave += (amps[i] as number) * Math.sin(6.5 * d - 1.9 * t) * Math.exp(-0.42 * d);
+  }
+  return wave;
+}
