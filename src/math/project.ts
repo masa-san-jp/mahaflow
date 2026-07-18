@@ -33,6 +33,13 @@ export function squaredDistance(p: [number, number], proj: ProjCluster): number 
   return proj.a * dx * dx + 2 * proj.b * dx * dy + proj.c * dy * dy;
 }
 
+/** Forward 2x2 covariance recovered from a projected cluster's precision matrix (design spec §4.7 particle spawning needs Σ, not Σ⁻¹). */
+export function covariance2x2(proj: ProjCluster): { Suu: number; Suv: number; Svv: number } {
+  const det = proj.a * proj.c - proj.b * proj.b;
+  const safeDet = Math.abs(det) < 1e-9 ? (det < 0 ? -1e-9 : 1e-9) : det;
+  return { Suu: proj.c / safeDet, Suv: -proj.b / safeDet, Svv: proj.a / safeDet };
+}
+
 export interface FieldSample {
   D: number;
   s: number;

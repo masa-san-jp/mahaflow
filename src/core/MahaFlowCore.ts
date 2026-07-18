@@ -10,11 +10,14 @@ import { DEFAULT_LIVE_PARAMS, sanitizeLiveParamsPatch, type LiveParams } from '.
 import { EventBus, type MahaEvent, type MahaEventMap } from './events';
 import { ModulationBus, type ModulationSource } from './modulation';
 import { BUILTIN_PRESETS, type PresetDef } from './presets';
+import { deterministicShuffle, framesPerInterval, type AutoplayConfig, type AutoplayState } from './autoplay';
 import { resolvePalette } from '../palette/palettes';
 import type { PaletteDef } from '../palette/palettes';
 import type { State } from './state';
 import type { InitConfig } from './types';
-import { Prng } from '../math/prng';
+import { Prng, substream } from '../math/prng';
+
+const CLOCK_FPS = 30;
 
 export interface CoreDeps {
   createRenderer?: (canvas: HTMLCanvasElement) => FieldRenderer;
@@ -52,6 +55,12 @@ export class MahaFlowCore {
   private readonly rafLoop: RafLoop;
   private readonly detachControls: () => void;
   private disposed = false;
+
+  private autoplayConfig: AutoplayConfig | null = null;
+  private autoplayIndex = 0;
+  private autoplayShuffleOrder: string[] = [];
+  private autoplayRandomizeRng: Prng | null = null;
+  private lastAutoplayFrame = 0;
 
   constructor(
     private readonly container: HTMLElement,
@@ -96,7 +105,7 @@ export class MahaFlowCore {
 
     this.raw = generateRawClusters(this.seed, this.dims, this.maxClusters);
     this.clusters = buildClusters(this.raw, this.live.spread, this.live.anisotropy);
-    this.clock = new DeterministicClock(30);
+    this.clock = new DeterministicClock(CLOCK_FPS);
 
     this.canvas = container.ownerDocument.createElement('canvas');
     this.canvas.style.display = 'block';
@@ -156,6 +165,13 @@ export class MahaFlowCore {
     const resolved = this.modulation.resolve(this.live, this.clock.currentFrame);
     if (resolved.playing) {
       this.clock.advanceByElapsedSeconds(deltaSeconds, 0.12 + 1.4 * resolved.speed);
+    }
+    if (this.autoplayConfig && resolved.playing) {
+      const dueFrames = framesPerInterval(this.autoplayConfig.interval, CLOCK_FPS);
+      if (this.clock.currentFrame - this.lastAutoplayFrame >= dueFrames) {
+        this.lastAutoplayFrame = this.clock.currentFrame;
+        this.advanceAutoplay();
+      }
     }
     const t = this.clock.time;
     const basis = tourBasis(t, this.dims);
@@ -237,8 +253,12 @@ export class MahaFlowCore {
       seed: this.seed,
       frame: this.clock.currentFrame,
       clusters: opts.resolved ? this.clustersFor(live) : this.clusters,
-      autoplay: false,
+      autoplay: this.autoplayState(),
     };
+  }
+
+  private autoplayState(): AutoplayState {
+    return this.autoplayConfig ? { ...this.autoplayConfig, index: this.autoplayIndex } : false;
   }
 
   randomize(seed?: number): void {
@@ -323,6 +343,49 @@ export class MahaFlowCore {
 
   listPresets(): string[] {
     return Array.from(this.presets.keys());
+  }
+
+  /**
+   * Start/restart cycling on a frame-based interval (design spec §8). If
+   * `transition` is "crossfade", this falls back to a "cut" (instant switch)
+   * with a warning — the interpolated crossfade path is P2c scope.
+   */
+  startAutoplay(cfg: AutoplayConfig = { interval: 20, sequence: 'randomize' }): void {
+    if (this.guardDisposed()) return;
+    if (cfg.transition === 'crossfade') {
+      this.events.emit('warning', {
+        code: 'crossfade-unsupported',
+        message: 'Autoplay crossfade transitions are not yet implemented; using a cut instead.',
+      });
+    }
+    this.autoplayConfig = cfg;
+    this.autoplayIndex = 0;
+    this.lastAutoplayFrame = this.clock.currentFrame;
+    this.autoplayRandomizeRng = cfg.sequence === 'randomize' ? substream(this.seedInitial, 'autoplay-randomize') : null;
+    this.autoplayShuffleOrder =
+      cfg.sequence === 'shuffle' ? deterministicShuffle(this.listPresets(), substream(this.seedInitial, 'autoplay-shuffle')) : [];
+    this.events.emit('statechange', this.getState());
+  }
+
+  stopAutoplay(): void {
+    if (this.guardDisposed()) return;
+    if (!this.autoplayConfig) return;
+    this.autoplayConfig = null;
+    this.events.emit('statechange', this.getState());
+  }
+
+  private advanceAutoplay(): void {
+    const config = this.autoplayConfig as AutoplayConfig;
+    this.autoplayIndex++;
+    if (config.sequence === 'randomize') {
+      const rng = this.autoplayRandomizeRng as Prng;
+      this.randomize(Math.floor(rng.next() * 0xffffffff));
+      return;
+    }
+    const names = config.sequence === 'shuffle' ? this.autoplayShuffleOrder : config.sequence;
+    if (names.length > 0) {
+      this.applyPreset(names[this.autoplayIndex % names.length] as string);
+    }
   }
 
   on<K extends MahaEvent>(event: K, cb: (payload: MahaEventMap[K]) => void): () => void {

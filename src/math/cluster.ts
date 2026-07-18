@@ -4,6 +4,8 @@ import { addScaledIdentity, selfOuter } from './linalg';
 export interface GeneratedCluster {
   mu: number[];
   sigma: number[][];
+  /** The anisotropy-scaled matrix A with sigma = A·Aᵀ + εI. Point-cloud sampling (§4.6) draws x = mu + A·z directly from it. */
+  a: number[][];
   amp: number;
 }
 
@@ -57,7 +59,7 @@ export function buildClusters(
     const mu = zMu.map((v) => spread * v);
     const a = (raw.zA[i] as number[][]).map((row) => row.map((v) => anisotropy * v));
     const sigma = addScaledIdentity(selfOuter(a), eps);
-    return { mu, sigma, amp: raw.ampBase[i] as number };
+    return { mu, sigma, a, amp: raw.ampBase[i] as number };
   });
   return centerClusters(clusters);
 }

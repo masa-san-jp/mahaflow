@@ -8,7 +8,7 @@ describe('T-M07 projected distance correctness', () => {
       [2, 0.5],
       [0.5, 1],
     ];
-    const cluster: GeneratedCluster = { mu: [0, 0], sigma, amp: 1 };
+    const cluster: GeneratedCluster = { mu: [0, 0], sigma, a: sigma, amp: 1 };
     const u = [1, 0];
     const v = [0, 1];
 
@@ -34,7 +34,7 @@ describe('T-M08 soft-min convergence', () => {
       [1.6, 0.2],
       [0.2, 0.9],
     ];
-    const cluster: GeneratedCluster = { mu: [0.3, -0.2], sigma, amp: 1 };
+    const cluster: GeneratedCluster = { mu: [0.3, -0.2], sigma, a: sigma, amp: 1 };
     const u = [1, 0];
     const v = [0, 1];
     const proj = projectCluster(cluster, u, v);
@@ -61,6 +61,10 @@ describe('wave interference term (spec §4.5)', () => {
     const cluster: GeneratedCluster = {
       mu: [0, 0],
       sigma: [
+        [1, 0],
+        [0, 1],
+      ],
+      a: [
         [1, 0],
         [0, 1],
       ],
