@@ -53,6 +53,9 @@ export {
 } from './palette/luminance';
 export { createFieldRenderer } from './render/fieldView';
 export type { FieldRenderer, FrameUniforms } from './render/fieldView';
+export { createOrbitRenderer } from './render/orbitView';
+export type { OrbitRenderer, OrbitFrameData } from './render/orbitView';
+export { terrainHeight, floorIsoline, fbm } from './math/terrain';
 export { exportOffline, ExportCancelledError, ExportNonFiniteError } from './export/offline';
 export type { ExportConfig, ExportProgress, OfflineExportDeps, OfflineExportHooks, RenderFrameFn } from './export/offline';
 export { startRealtimeRecording } from './export/realtime';

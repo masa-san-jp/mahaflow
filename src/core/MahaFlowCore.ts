@@ -5,7 +5,8 @@ import { evalField, projectCluster } from '../math/project';
 import { tourBasis } from '../math/tour';
 import { DeterministicClock, frameToTime, normalizeTimebase } from './clock';
 import { RafLoop } from './rafLoop';
-import { createFieldRenderer, type FieldRenderer, type FrameUniforms } from '../render/fieldView';
+import { createFieldRenderer, type FieldRenderer } from '../render/fieldView';
+import { createOrbitRenderer, type OrbitRenderer } from '../render/orbitView';
 import { screenToField } from '../interact/pointer';
 import { attachControls } from '../interact/controls';
 import { DEFAULT_LIVE_PARAMS, sanitizeLiveParamsPatch, type LiveParams } from './config';
@@ -20,6 +21,7 @@ import type { InitConfig } from './types';
 import { Prng, substream } from '../math/prng';
 import { exportOffline, type ExportConfig } from '../export/offline';
 import { startRealtimeRecording } from '../export/realtime';
+import { QualityManager } from './quality';
 
 const CLOCK_FPS = 30;
 const EXPORT_MAX_WIDTH = 1920;
@@ -29,6 +31,7 @@ const EXPORT_4K_THRESHOLD = 3840;
 
 export interface CoreDeps {
   createRenderer?: (canvas: HTMLCanvasElement) => FieldRenderer;
+  createOrbitRenderer?: (canvas: HTMLCanvasElement) => OrbitRenderer;
 }
 
 /**
@@ -44,7 +47,8 @@ export class MahaFlowCore {
   private readonly seedInitial: number;
   private readonly dims: number;
   private readonly maxClusters: number;
-  private readonly pixelRatio: number;
+  private pixelRatio: number;
+  private readonly quality = new QualityManager();
   private readonly extraPalettes: Record<string, PaletteDef>;
 
   private readonly events = new EventBus();
@@ -57,8 +61,12 @@ export class MahaFlowCore {
 
   private readonly randomizeRng: Prng;
   private readonly clock: DeterministicClock;
-  private readonly canvas: HTMLCanvasElement;
-  private readonly renderer: FieldRenderer;
+  private canvas: HTMLCanvasElement;
+  private readonly createFieldRendererFn: (canvas: HTMLCanvasElement) => FieldRenderer;
+  private readonly createOrbitRendererFn: (canvas: HTMLCanvasElement) => OrbitRenderer;
+  private renderer: FieldRenderer | OrbitRenderer;
+  private rendererKind: 'field' | 'orbit';
+  private lastCanvasSize = { width: 0, height: 0, pixelRatio: 1 };
   private readonly resizeObserver: ResizeObserver;
   private readonly rafLoop: RafLoop;
   private readonly detachControls: () => void;
@@ -130,12 +138,17 @@ export class MahaFlowCore {
     this.canvas.addEventListener('pointermove', this.onPointerMove);
 
     this.detachControls = attachControls(container, {
+      getView: () => this.live.view,
       getZoomPan: () => ({ zoom: this.live.zoom, pan: this.live.pan }),
       setZoomPan: (zoom, pan) => this.setConfig({ zoom, pan }),
+      getOrbit: () => this.live.orbit,
+      setOrbit: (orbit) => this.setConfig({ orbit }),
     });
 
-    const factory = deps.createRenderer ?? createFieldRenderer;
-    this.renderer = factory(this.canvas);
+    this.createFieldRendererFn = deps.createRenderer ?? createFieldRenderer;
+    this.createOrbitRendererFn = deps.createOrbitRenderer ?? createOrbitRenderer;
+    this.rendererKind = this.live.view;
+    this.renderer = this.rendererKind === 'orbit' ? this.createOrbitRendererFn(this.canvas) : this.createFieldRendererFn(this.canvas);
 
     this.resizeObserver = new container.ownerDocument.defaultView!.ResizeObserver((entries) => {
       for (const entry of entries) {
@@ -145,6 +158,7 @@ export class MahaFlowCore {
         if (this.exportAbortController) continue; // don't fight the export resolution mid-export
         this.canvas.width = Math.round(width * this.pixelRatio);
         this.canvas.height = Math.round(height * this.pixelRatio);
+        this.lastCanvasSize = { width: this.canvas.width, height: this.canvas.height, pixelRatio: this.pixelRatio };
         this.renderer.setSize(this.canvas.width, this.canvas.height, this.pixelRatio);
       }
     });
@@ -197,14 +211,47 @@ export class MahaFlowCore {
   }
 
   /**
-   * Pure per-frame evaluation shared by the display loop and export (design
-   * spec §3.3 frame pipeline / §7.2 determinism condition): given a frame
-   * number, resolve modulation, project clusters, and build uniforms.
+   * Swap the active renderer (and WebGL context — only one renderer may own
+   * the canvas at a time) when `live.view` changes. Driven off the base
+   * `live.view`, not the per-frame modulation-resolved value, so a
+   * frame-only modulation source can never thrash renderer/context churn.
+   */
+  private ensureRendererForView(view: 'field' | 'orbit'): void {
+    if (view === this.rendererKind) return;
+    this.renderer.dispose();
+
+    // A WebGL context loses/frees asynchronously; requesting a new one on
+    // the very same canvas element immediately after can return a still-
+    // lost context. A fresh canvas element guarantees a clean context.
+    const oldCanvas = this.canvas;
+    const newCanvas = oldCanvas.ownerDocument.createElement('canvas');
+    newCanvas.style.display = 'block';
+    newCanvas.style.width = '100%';
+    newCanvas.style.height = '100%';
+    newCanvas.width = oldCanvas.width;
+    newCanvas.height = oldCanvas.height;
+    oldCanvas.replaceWith(newCanvas);
+    oldCanvas.removeEventListener('pointermove', this.onPointerMove);
+    newCanvas.addEventListener('pointermove', this.onPointerMove);
+    this.canvas = newCanvas;
+
+    this.rendererKind = view;
+    this.renderer = view === 'orbit' ? this.createOrbitRendererFn(this.canvas) : this.createFieldRendererFn(this.canvas);
+    this.renderer.setSize(this.lastCanvasSize.width, this.lastCanvasSize.height, this.lastCanvasSize.pixelRatio);
+  }
+
+  /**
+   * Pure per-frame evaluation + render shared by the display loop and
+   * export (design spec §3.3 frame pipeline / §7.2 determinism condition):
+   * given a frame number, resolve modulation, project clusters, and draw.
    * Depends only on `frameNumber` (plus the current base live/cluster
    * state) — never on wall-clock time — so calling it twice with the same
    * frame number always produces the same result, live display or export.
+   * Returns false (without drawing) if the frame's field data is non-finite.
    */
-  private evaluateFrame(frameNumber: number): { uniforms: FrameUniforms; finite: boolean } {
+  private renderCurrentFrame(frameNumber: number): boolean {
+    this.ensureRendererForView(this.live.view);
+
     const resolved = this.modulation.resolve(this.live, frameNumber);
     const t = frameToTime(frameNumber, CLOCK_FPS);
     const basis = tourBasis(t, this.dims);
@@ -218,18 +265,40 @@ export class MahaFlowCore {
       Number.isFinite(tau) &&
       projected.every((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && Number.isFinite(p.c) && p.m.every(Number.isFinite)) &&
       amps.every(Number.isFinite);
+    if (!finite) return false;
 
-    const uniforms: FrameUniforms = {
-      projected,
-      amps,
-      tau,
-      zoom: resolved.zoom,
-      pan: resolved.pan,
-      mode: resolved.mode,
-      time: t,
-      palette: resolvePalette(resolved.palette, this.extraPalettes),
-    };
-    return { uniforms, finite };
+    const palette = resolvePalette(resolved.palette, this.extraPalettes);
+
+    if (this.rendererKind === 'field') {
+      (this.renderer as FieldRenderer).renderFrame({
+        projected,
+        amps,
+        tau,
+        zoom: resolved.zoom,
+        pan: resolved.pan,
+        mode: resolved.mode,
+        time: t,
+        palette,
+      });
+    } else {
+      (this.renderer as OrbitRenderer).renderFrame({
+        projected,
+        amps,
+        tau,
+        mode: resolved.mode,
+        terrain: resolved.terrain,
+        flow: resolved.flow,
+        time: t,
+        palette,
+        orbit: resolved.orbit,
+        clusters,
+        clusterCount: resolved.clusterCount,
+        basis,
+        seed: this.seed,
+        pointCount: this.quality.current.pointCount,
+      });
+    }
+    return true;
   }
 
   private onFrame(deltaSeconds: number): void {
@@ -246,16 +315,30 @@ export class MahaFlowCore {
       }
     }
 
-    const { uniforms, finite } = this.evaluateFrame(this.clock.currentFrame);
-    if (!finite) {
+    if (!this.renderCurrentFrame(this.clock.currentFrame)) {
       this.events.emit('warning', { code: 'nan-frame-skip', message: 'Non-finite field parameters; frame skipped.' });
-      return;
     }
-    this.renderer.renderFrame(uniforms);
+
+    // Auto quality degradation (design spec §13). deltaSeconds is the
+    // display loop's real elapsed time between frames (RafLoop's one
+    // sanctioned wall-clock reading) — never applied during export, since
+    // exportOfflineInternal stops the display loop before rendering frames.
+    const degraded = this.quality.recordFrame(deltaSeconds * 1000);
+    if (degraded) {
+      this.pixelRatio = degraded.pixelRatio;
+      this.canvas.width = Math.round(this.lastContainerSize.width * this.pixelRatio);
+      this.canvas.height = Math.round(this.lastContainerSize.height * this.pixelRatio);
+      this.lastCanvasSize = { width: this.canvas.width, height: this.canvas.height, pixelRatio: this.pixelRatio };
+      this.renderer.setSize(this.canvas.width, this.canvas.height, this.pixelRatio);
+      this.events.emit('warning', {
+        code: 'quality-degraded',
+        message: `Sustained frame time over budget; degraded to pixelRatio=${degraded.pixelRatio}, pointCount=${degraded.pointCount}.`,
+      });
+    }
   }
 
   private readonly onPointerMove = (e: PointerEvent): void => {
-    if (this.disposed) return;
+    if (this.disposed || this.live.view !== 'field') return;
     const rect = this.canvas.getBoundingClientRect();
     const width = rect.width || this.canvas.width;
     const height = rect.height || this.canvas.height;
@@ -537,9 +620,7 @@ export class MahaFlowCore {
         {
           canvas: this.canvas,
           renderFrame: (frameIndex) => {
-            const { uniforms, finite } = this.evaluateFrame(frameIndex);
-            lastFrameFinite = finite;
-            if (finite) this.renderer.renderFrame(uniforms);
+            lastFrameFinite = this.renderCurrentFrame(frameIndex);
           },
           isFinite: () => lastFrameFinite,
         },
