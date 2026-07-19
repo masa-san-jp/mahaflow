@@ -1,16 +1,10 @@
 import * as THREE from 'three';
 import type { ProjCluster } from '../math/project';
 import { MAX_CLUSTERS, fieldFragmentShader, fieldVertexShader } from './shaders/field.glsl';
+import { AURORA_PALETTE, type PaletteDef } from '../palette/palettes';
 
-export interface PaletteDef {
-  freq: [number, number, number];
-  phase: [number, number, number];
-}
-
-export const AURORA_PALETTE: PaletteDef = {
-  freq: [1.0, 1.0, 1.0],
-  phase: [0.0, 0.33, 0.67],
-};
+export type { PaletteDef };
+export { AURORA_PALETTE };
 
 export interface FrameUniforms {
   projected: ProjCluster[];
@@ -19,6 +13,8 @@ export interface FrameUniforms {
   zoom?: number;
   pan?: [number, number];
   palette?: PaletteDef;
+  mode?: number;
+  time?: number;
 }
 
 export interface FieldRenderer {
@@ -30,9 +26,9 @@ export interface FieldRenderer {
 }
 
 /**
- * Smooth field-view renderer (P0-6). A single full-screen shader plane
- * evaluating evalField(); mode/view/terrain branching beyond "smooth" +
- * "field" is P2 scope.
+ * Field-view renderer (P0-6 + P2a mode/palette support). A single
+ * full-screen shader plane evaluating evalField()/evalWave(); the particle
+ * mode (3) and the orbit view are P2b scope, not implemented here yet.
  */
 export function createFieldRenderer(canvas: HTMLCanvasElement): FieldRenderer {
   const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false });
@@ -50,6 +46,8 @@ export function createFieldRenderer(canvas: HTMLCanvasElement): FieldRenderer {
     uPan: { value: new THREE.Vector2(0, 0) },
     uPaletteFreq: { value: new THREE.Vector3(...AURORA_PALETTE.freq) },
     uPalettePhase: { value: new THREE.Vector3(...AURORA_PALETTE.phase) },
+    uMode: { value: 0 },
+    uTime: { value: 0 },
   };
 
   const material = new THREE.ShaderMaterial({
@@ -93,6 +91,10 @@ export function createFieldRenderer(canvas: HTMLCanvasElement): FieldRenderer {
         uniforms.uPaletteFreq.value.set(...frame.palette.freq);
         uniforms.uPalettePhase.value.set(...frame.palette.phase);
       }
+      // Mode 3 (particle) falls back to smooth shading here; the point-sprite
+      // particle system is P2b scope (see render/fieldView.ts module doc).
+      uniforms.uMode.value = frame.mode === 1 || frame.mode === 2 ? frame.mode : 0;
+      uniforms.uTime.value = frame.time ?? 0;
       renderer.render(scene, camera);
     },
     dispose() {

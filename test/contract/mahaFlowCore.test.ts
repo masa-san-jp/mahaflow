@@ -1,62 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MahaFlowCore } from '../../src/core/MahaFlowCore';
-import type { FieldRenderer } from '../../src/render/fieldView';
-
-class FakeResizeObserver {
-  static instances: FakeResizeObserver[] = [];
-  callback: ResizeObserverCallback;
-  observed: Element[] = [];
-  disconnected = false;
-
-  constructor(callback: ResizeObserverCallback) {
-    this.callback = callback;
-    FakeResizeObserver.instances.push(this);
-  }
-  observe(el: Element) {
-    this.observed.push(el);
-  }
-  unobserve() {}
-  disconnect() {
-    this.disconnected = true;
-  }
-  trigger(width: number, height: number) {
-    this.callback(
-      [{ contentRect: { width, height } } as ResizeObserverEntry],
-      this as unknown as ResizeObserver,
-    );
-  }
-}
-
-function makeFakeRenderer(): FieldRenderer & { setSizeCalls: Array<[number, number, number]>; disposeCalls: number } {
-  const setSizeCalls: Array<[number, number, number]> = [];
-  let disposeCalls = 0;
-  return {
-    canvas: document.createElement('canvas'),
-    ready: Promise.resolve(),
-    setSize(w: number, h: number, pr: number) {
-      setSizeCalls.push([w, h, pr]);
-    },
-    renderFrame() {},
-    dispose() {
-      disposeCalls++;
-    },
-    get setSizeCalls() {
-      return setSizeCalls;
-    },
-    get disposeCalls() {
-      return disposeCalls;
-    },
-  } as unknown as FieldRenderer & { setSizeCalls: Array<[number, number, number]>; disposeCalls: number };
-}
+import { FakeResizeObserver, installBrowserStubs, makeFakeRenderer } from './testUtils';
 
 beforeEach(() => {
-  FakeResizeObserver.instances = [];
-  (globalThis as any).ResizeObserver = FakeResizeObserver;
-  if (!(globalThis as any).requestAnimationFrame) {
-    (globalThis as any).requestAnimationFrame = (cb: FrameRequestCallback) =>
-      setTimeout(() => cb(performance.now()), 16) as unknown as number;
-    (globalThis as any).cancelAnimationFrame = (h: number) => clearTimeout(h);
-  }
+  installBrowserStubs();
 });
 
 afterEach(() => {

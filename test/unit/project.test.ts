@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { evalField, projectCluster, squaredDistance } from '../../src/math/project';
+import { evalField, evalWave, projectCluster, squaredDistance } from '../../src/math/project';
 import type { GeneratedCluster } from '../../src/math/cluster';
 
 describe('T-M07 projected distance correctness', () => {
@@ -8,7 +8,7 @@ describe('T-M07 projected distance correctness', () => {
       [2, 0.5],
       [0.5, 1],
     ];
-    const cluster: GeneratedCluster = { mu: [0, 0], sigma, amp: 1 };
+    const cluster: GeneratedCluster = { mu: [0, 0], sigma, a: sigma, amp: 1 };
     const u = [1, 0];
     const v = [0, 1];
 
@@ -34,7 +34,7 @@ describe('T-M08 soft-min convergence', () => {
       [1.6, 0.2],
       [0.2, 0.9],
     ];
-    const cluster: GeneratedCluster = { mu: [0.3, -0.2], sigma, amp: 1 };
+    const cluster: GeneratedCluster = { mu: [0.3, -0.2], sigma, a: sigma, amp: 1 };
     const u = [1, 0];
     const v = [0, 1];
     const proj = projectCluster(cluster, u, v);
@@ -53,5 +53,30 @@ describe('T-M08 soft-min convergence', () => {
     const { D } = evalField(p, [proj], [1], tau);
 
     expect(Math.abs(D - analytic) / analytic).toBeLessThan(0.05);
+  });
+});
+
+describe('wave interference term (spec §4.5)', () => {
+  it('is zero exactly at a cluster mean at t=0 and matches sin/exp by hand elsewhere', () => {
+    const cluster: GeneratedCluster = {
+      mu: [0, 0],
+      sigma: [
+        [1, 0],
+        [0, 1],
+      ],
+      a: [
+        [1, 0],
+        [0, 1],
+      ],
+      amp: 1,
+    };
+    const proj = projectCluster(cluster, [1, 0], [0, 1]);
+
+    expect(evalWave([0, 0], [proj], [1], 0)).toBeCloseTo(0, 12);
+
+    const p: [number, number] = [3, 4]; // d = 5
+    const t = 2;
+    const expected = Math.sin(6.5 * 5 - 1.9 * t) * Math.exp(-0.42 * 5);
+    expect(evalWave(p, [proj], [1], t)).toBeCloseTo(expected, 9);
   });
 });

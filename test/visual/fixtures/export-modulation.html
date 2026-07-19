@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8" /><title>export-modulation fixture</title></head>
+<body>
+<div id="container" style="width:160px;height:90px"></div>
+<script type="importmap">
+{ "imports": { "three": "../../../node_modules/three/build/three.module.js" } }
+</script>
+<script type="module">
+  import { MahaFlowCore, createFieldRenderer } from '../../../dist/maha-flow.js';
+
+  window.runModulationExportTest = async (frameCount, fps) => {
+    const zoomAt = (frame) => 1 + frame * 0.05;
+    const recorded = [];
+
+    const container = document.getElementById('container');
+    const core = new MahaFlowCore(
+      container,
+      { seed: 1 },
+      {
+        createRenderer: (canvas) => {
+          const real = createFieldRenderer(canvas);
+          return {
+            ...real,
+            renderFrame(frame) {
+              recorded.push(frame.zoom);
+              real.renderFrame(frame);
+            },
+          };
+        },
+      },
+    );
+    await core.ready;
+
+    core.addModulation((frame) => ({ zoom: zoomAt(frame) }));
+
+    const blob = await core.exportVideo({
+      mode: 'offline',
+      width: 160,
+      height: 90,
+      duration: frameCount / fps,
+      fps,
+    });
+
+    core.dispose();
+
+    return {
+      blobSize: blob.size,
+      recordedZoom: recorded,
+      expectedZoom: Array.from({ length: frameCount }, (_, i) => zoomAt(i)),
+    };
+  };
+</script>
+</body>
+</html>
