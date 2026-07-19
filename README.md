@@ -57,6 +57,13 @@ T-P01〜T-P02(60fps計測・上限負荷の性能ベンチマーク)。
 
 ## セットアップ
 
+### 前提環境
+
+- **Node.js 18以上**（推奨: 20 LTS）と **npm**。`node -v` / `npm -v` で確認できる。
+  - 未インストールの場合、macOS なら `brew install node`（または [nvm](https://github.com/nvm-sh/nvm) 等のバージョンマネージャ）で導入する。
+
+### 手順
+
 ```sh
 npm install
 npm run check                # lint + typecheck + test
